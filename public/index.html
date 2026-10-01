@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jev3D Sentinels</title>
+  <style>
+    :root { --bg: #0e1116; --panel: rgba(14, 17, 22, 0.82); --line: #2a3345; --text: #e5e9f0; --dim: #8b95a7; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 13px/1.4 ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+    #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+    .hidden { display: none !important; }
+    .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; backdrop-filter: blur(6px); }
+    #status { top: 12px; left: 12px; width: 240px; }
+    #hpbar { height: 8px; background: #2a3345; border-radius: 4px; overflow: hidden; margin: 4px 0 8px; }
+    #hp { height: 100%; width: 100%; background: linear-gradient(90deg, #f87171, #6ee7b7); transition: width .15s; }
+    #alarm { display: none; color: #f87171; font-weight: 700; letter-spacing: .08em; animation: blink .6s infinite alternate; }
+    #alarm.on { display: block; }
+    @keyframes blink { to { opacity: .35; } }
+    .keys { color: var(--dim); font-size: 11px; margin-top: 6px; }
+    #jev { top: 12px; right: 12px; width: 300px; max-height: calc(100% - 24px); overflow: auto; }
+    #jev h3 { margin: 0 0 6px; font-size: 13px; display: flex; gap: 8px; align-items: center; }
+    .badge { font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 700; }
+    .badge.live { background: #065f46; color: #6ee7b7; }
+    .badge.mock { background: #3f3f46; color: #e4e4e7; }
+    .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 10px; color: var(--dim); font-size: 11px; margin-bottom: 8px; }
+    .stats b { color: var(--text); font-weight: 600; }
+    #jev-err { color: #fbbf24; font-size: 11px; }
+    .card { border-top: 1px solid var(--line); padding: 6px 0; }
+    .card.dead { opacity: .35; }
+    .row { display: flex; gap: 8px; align-items: baseline; }
+    .row .conf { margin-left: auto; color: var(--dim); }
+    .row.small { font-size: 11px; color: var(--dim); justify-content: space-between; }
+    .bars { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 8px; margin: 4px 0; }
+    .bar { position: relative; height: 14px; background: #1a2130; border-radius: 3px; overflow: hidden; font-size: 10px; }
+    .bar i { position: absolute; inset: 0 auto 0 0; width: 0; opacity: .55; transition: width .3s; }
+    .bar span { position: relative; padding-left: 4px; color: var(--text); }
+    #log { font-size: 11px; color: var(--dim); border-top: 1px solid var(--line); padding-top: 6px; margin-top: 4px; }
+    #log span { color: #5b6477; font-variant-numeric: tabular-nums; }
+    #tags { position: fixed; inset: 0; pointer-events: none; }
+    .tag { position: absolute; left: 0; top: 0; font-size: 11px; background: rgba(0,0,0,.55); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
+    #cross { position: fixed; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px; pointer-events: none; }
+    #cross::before, #cross::after { content: ""; position: absolute; background: #fff; opacity: .8; }
+    #cross::before { left: 6px; top: 0; width: 2px; height: 14px; }
+    #cross::after { top: 6px; left: 0; height: 2px; width: 14px; }
+    #hurt { position: fixed; inset: 0; background: radial-gradient(transparent 50%, #b91c1c); opacity: 0; pointer-events: none; transition: opacity .15s; }
+    .overlay { position: fixed; inset: 0; display: grid; place-items: center; background: rgba(8,10,14,.7); text-align: center; pointer-events: none; }
+    .overlay h1 { margin: 0 0 8px; font-size: 32px; }
+    .overlay p { color: var(--dim); max-width: 460px; margin: 4px auto; }
+    @media (max-width: 760px) { #jev { width: calc(100% - 24px); top: auto; bottom: 12px; max-height: 40%; } #status { width: calc(100% - 24px); } }
+  </style>
+  <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" } }
+  </script>
+</head>
+<body>
+  <canvas id="view"></canvas>
+  <div id="tags"></div>
+  <div id="cross"></div>
+  <div id="hurt"></div>
+
+  <div id="status" class="panel">
+    <div class="row"><b>Intruder</b><span style="margin-left:auto" id="hp-num">100</span></div>
+    <div id="hpbar"><div id="hp"></div></div>
+    <div class="row">Data cores <b style="margin-left:auto" id="cores">0/5</b></div>
+    <div id="alarm">⚠ ALARM</div>
+    <div class="keys">WASD move · Shift sprint · Space jump · Mouse aim · Click fire · R restart</div>
+  </div>
+
+  <div id="jev" class="panel">
+    <h3>Jev brain <span id="jev-mode" class="badge">…</span></h3>
+    <div class="stats">
+      <span>model <b id="jev-model">…</b></span><span>calls <b id="jev-calls">0</b></span>
+      <span>p95 <b id="jev-p95">–</b></span><span>tick <b id="jev-int">–</b></span>
+      <span>questions/call <b id="jev-q">0</b></span>
+    </div>
+    <div id="jev-err"></div>
+    <div id="guards"></div>
+    <div id="log"></div>
+  </div>
+
+  <div id="intro" class="overlay">
+    <div>
+      <h1>Jev3D · Sentinels</h1>
+      <p>Steal the 5 glowing data cores. Four guards are driven by <b>Jev</b>: each decision tick the engine sends one batched request (state + typed Choice / Score / Noul questions per guard), and the engine executes the answers.</p>
+      <p><b>Click to start</b></p>
+    </div>
+  </div>
+  <div id="over" class="overlay hidden">
+    <div><h1 id="over-title"></h1><p id="over-why"></p></div>
+  </div>
+
+  <script type="module" src="./game/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "jev3d",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A small Three.js 3D game engine with Jev (TypeSafe AI System One) driving NPC decisions.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": { "node": ">=18" }
+}
