@@ -150,11 +150,23 @@ export class JevClient {
  * The model only chooses; the engine executes and verifies. Decisions are
  * requested at an adaptive rate (~3x rolling p95 latency, clamped), and only
  * one request is in flight at a time so stale state never piles up.
+ *
+ * Options:
+ *   signatureFn(state) -> string   coarse summary of what matters; if it hasn't
+ *                                  changed since the last call, the request is
+ *                                  skipped (until maxInterval forces a refresh).
+ *   recordLimit                    how many request/answer pairs to keep for export.
  */
 export class JevBrainSystem {
-  constructor(client, { stateFn, minInterval = 0.5, maxInterval = 3, onDecision } = {}) {
+  constructor(client, { stateFn, signatureFn, minInterval = 0.5, maxInterval = 3, recordLimit = 500, onDecision } = {}) {
     this.client = client;
     this.stateFn = stateFn;
+    this.signatureFn = signatureFn;
+    this.recordLimit = recordLimit;
+    this.recording = [];
+    this.skipped = 0;
+    this.sinceCall = Infinity;
+    this.lastSig = null;
     this.minInterval = minInterval;
     this.maxInterval = maxInterval;
     this.onDecision = onDecision;
@@ -178,11 +190,22 @@ export class JevBrainSystem {
 
   update(dt, engine) {
     this.cooldown -= dt;
+    this.sinceCall += dt;
     if (this.inFlight || this.cooldown > 0) return;
     const agents = engine.query("brain").filter((e) => e.alive !== false);
     if (!agents.length) return;
 
     const state = this.stateFn(engine);
+    if (this.signatureFn) {
+      const sig = this.signatureFn(state);
+      if (sig === this.lastSig && this.sinceCall < this.maxInterval) {
+        this.skipped++;
+        this.cooldown = this.minInterval;
+        return;
+      }
+      this.lastSig = sig;
+    }
+    this.sinceCall = 0;
     const questions = {};
     for (const a of agents) {
       for (const [k, q] of Object.entries(a.brain.questions(state))) questions[`${a.brain.id}__${k}`] = q;
@@ -196,6 +219,14 @@ export class JevBrainSystem {
         this.latencies.push(res.latencyMs);
         if (this.latencies.length > 40) this.latencies.shift();
         this.inputTokens += res.usage?.input_tokens ?? 0;
+        this.recording.push({
+          t: +engine.time.toFixed(2),
+          source: res.source,
+          latency_ms: Math.round(res.latencyMs),
+          request: { state, questions: JSON.parse(JSON.stringify(questions)) },
+          answers: res.answers,
+        });
+        if (this.recording.length > this.recordLimit) this.recording.shift();
 
         for (const a of agents) {
           if (a.alive === false) continue;
@@ -210,5 +241,14 @@ export class JevBrainSystem {
         this.inFlight = false;
         this.cooldown = this.interval;
       });
+  }
+
+  /** Every recorded request/answer pair as pretty JSON (for debugging or fine-tuning datasets). */
+  exportRecording() {
+    return JSON.stringify(
+      { model: this.client.live ? this.client.model : "mock", calls: this.calls, skipped: this.skipped, decisions: this.recording },
+      null,
+      2
+    );
   }
 }

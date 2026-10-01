@@ -11,7 +11,28 @@ set of typed questions and returns typed answers with calibrated probabilities:
 | `noul`   | a yes/no statement                 | `noul` (probability it's true)                |
 
 The demo game, **Sentinels**, is a stealth shooter: steal 5 data cores while four
-Jev-driven guards patrol, investigate, chase, take cover, flank, retreat and raise alarms.
+Jev-driven guards patrol, investigate, chase, take cover, flank, retreat and raise alarms,
+coordinated by a Jev squad commander.
+
+## Features
+
+- **Hierarchical Jev control:** a squad commander picks a team tactic (sweep, hold cores,
+  hunt, pincer, regroup) and a morale Score. Its choice goes into the shared state, so
+  every guard's own decision is conditioned on it. Both layers ride in one batched request.
+- **Stealth:** guards have a suspicion meter that fills based on distance, posture and
+  alarm state, instead of detecting you instantly. Crouching (C) drops you below crate
+  tops and silences footsteps; sprinting is loud. Gunfire and footsteps give guards a
+  fuzzy position.
+- **A\* navigation grid:** built from the physics colliders, with octile A\*, no corner
+  cutting, and line-of-sight string pulling. Takes about 0.2 ms per query on a 60×60 grid.
+- **Call skipping:** a coarse state signature (buckets for distance, suspicion and time
+  since last seen) skips the Jev request when nothing decision-relevant changed.
+  The HUD shows how many calls were saved.
+- **Decision recorder:** every request and answer pair is kept (last 500). Press **P**
+  to download it as JSON for debugging, replay analysis, or building eval and fine-tuning sets.
+- **Debug overlay:** press **G** to draw each guard's live A\* path, colored by action.
+- **Rendering:** bloom post-processing, soft shadows, a minimap with vision cones,
+  noise radius and the squad's last known intruder position.
 
 ## Run
 
@@ -20,7 +41,8 @@ npm start                                   # mock brain, no key needed
 TYPESAFE_API_KEY=... npm start              # real Jev (early access / waitlist)
 ```
 
-Open http://localhost:5173. Controls: WASD, Shift sprint, Space jump, mouse aim, click fire, R restart.
+Open http://localhost:5173. Controls: WASD, Shift sprint, C crouch, Space jump, mouse aim,
+click fire, G debug paths, P export Jev log, R restart.
 
 ## Architecture
 
@@ -28,16 +50,19 @@ Open http://localhost:5173. Controls: WASD, Shift sprint, Space jump, mouse aim,
 server.js                 zero-dep static server + /api/jev proxy (key stays server-side,
                           429/529 retried with backoff) → POST api.typesafe.ai/v1/systemone
 public/engine/
-  Engine.js               scene/renderer, fixed 60 Hz step, entities + systems
+  Engine.js               scene/renderer, fixed 60 Hz step, entities + systems, bloom
   Physics.js              gravity, cylinder bodies vs AABBs, line-of-sight
+  NavGrid.js              A* navigation grid with path smoothing
   Input.js                keyboard + pointer-lock mouse
   Jev.js                  Choice/Score/Noul builders, JevClient, JevBrainSystem
-public/game/              Sentinels demo: world, Player, Guard (Jev brain), HUD
+                          (batching, adaptive tick, call skipping, recorder)
+public/game/              Sentinels demo: world, Player, Guard + Squad (Jev brains), HUD
 ```
 
 **How the brain loop works (`JevBrainSystem`)**
 
-1. Each decision tick, build one shared `state` snapshot of the world.
+1. Each decision tick, build one shared `state` snapshot of the world. If its
+   `signatureFn` fingerprint is unchanged, skip the call.
 2. Collect every live agent's questions, prefix ids (`g1__action`, `g2__threat`…),
    and send **one** request. Jev answers them all in a single pass.
 3. Route answers back to each agent's `apply()`.

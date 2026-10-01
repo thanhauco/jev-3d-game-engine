@@ -1,4 +1,8 @@
 import * as THREE from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 import { Input } from "./Input.js";
 import { Physics } from "./Physics.js";
 
@@ -7,9 +11,10 @@ import { Physics } from "./Physics.js";
  *  - Fixed-timestep simulation (default 60 Hz) decoupled from render rate.
  *  - Entities are plain objects with an optional `object3d`, `body`, and any
  *    components you attach. Systems are { update(dt, engine), lateUpdate?() }.
+ *  - Optional bloom post-processing (`bloom: { strength, radius, threshold }`).
  */
 export class Engine {
-  constructor({ canvas, fixedHz = 60, background = 0x0e1116 } = {}) {
+  constructor({ canvas, fixedHz = 60, background = 0x0e1116, bloom } = {}) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
@@ -21,6 +26,15 @@ export class Engine {
     this.scene.background = new THREE.Color(background);
     this.scene.fog = new THREE.Fog(background, 40, 90);
     this.camera = new THREE.PerspectiveCamera(65, 1, 0.1, 200);
+
+    if (bloom) {
+      this.composer = new EffectComposer(this.renderer);
+      this.composer.addPass(new RenderPass(this.scene, this.camera));
+      const { strength = 0.7, radius = 0.4, threshold = 0.85 } = bloom;
+      this.bloomPass = new UnrealBloomPass(new THREE.Vector2(256, 256), strength, radius, threshold);
+      this.composer.addPass(this.bloomPass);
+      this.composer.addPass(new OutputPass());
+    }
 
     this.input = new Input(canvas);
     this.physics = new Physics();
@@ -70,6 +84,7 @@ export class Engine {
   resize() {
     const { clientWidth: w, clientHeight: h } = this.renderer.domElement;
     this.renderer.setSize(w, h, false);
+    this.composer?.setSize(w, h);
     this.camera.aspect = w / Math.max(h, 1);
     this.camera.updateProjectionMatrix();
   }
@@ -89,7 +104,8 @@ export class Engine {
       }
       const alpha = this._acc / this.fixedDt;
       for (const s of this.systems) s.lateUpdate?.(elapsed, this, alpha);
-      this.renderer.render(this.scene, this.camera);
+      if (this.composer) this.composer.render(elapsed);
+      else this.renderer.render(this.scene, this.camera);
       this.input.endFrame();
     };
     this._raf = requestAnimationFrame(frame);

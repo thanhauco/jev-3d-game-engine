@@ -55,6 +55,11 @@ export class Guard {
     this.coverPoint = null;
     this.stuckTime = 0;
     this.jitter = new THREE.Vector3();
+    this.suspicion = 0; // 0..1, fills while the intruder is in view; 1 = spotted
+    this.heardAt = -Infinity;
+    this.path = [];
+    this.pathGoal = null;
+    this.pathAt = -Infinity;
 
     const g = new THREE.Group();
     this.bodyMat = new THREE.MeshStandardMaterial({ color: 0xb4373f, roughness: 0.5 });
@@ -78,6 +83,12 @@ export class Guard {
     this.cone.rotation.x = -Math.PI / 2;
     this.cone.position.y = 0.03;
     g.add(this.cone);
+
+    // Debug overlay: current A* path (toggled with G)
+    this.pathLine = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 }));
+    this.pathLine.frustumCulled = false;
+    this.pathLine.visible = false;
+    game.engine.scene.add(this.pathLine);
 
     this.brain = { id, questions: (s) => this.questions(s), apply: (a) => this.apply(a) };
   }
@@ -106,6 +117,8 @@ export class Guard {
       position: [+this.pos.x.toFixed(1), +this.pos.z.toFixed(1)],
       current_action: this.action,
       sees_intruder: this.sees,
+      suspicion: +this.suspicion.toFixed(2),
+      heard_noise_s_ago: Number.isFinite(this.heardAt) ? +(time - this.heardAt).toFixed(1) : null,
       distance_to_intruder_m: this.sees || seenAgo !== null ? +this.pos.distanceTo(this.sees ? p.object3d.position : this.lastSeenPos).toFixed(1) : null,
       last_seen_intruder_s_ago: seenAgo,
       under_fire: time - this.lastHitAt < 3,
@@ -124,13 +137,16 @@ export class Guard {
         (s) => {
           const g = me(s);
           const knows = g.last_seen_intruder_s_ago !== null && g.last_seen_intruder_s_ago < 12;
+          const heard = g.heard_noise_s_ago !== null && g.heard_noise_s_ago < 6;
+          const sus = !g.sees_intruder && (g.suspicion > 0.3 || heard);
           const d = g.distance_to_intruder_m ?? 99;
+          const t = s.squad?.current_tactic;
           return {
-            patrol: knows || s.alarm_raised ? -1 : 2,
-            investigate: (knows || s.alarm_raised) && !g.sees_intruder ? 2 : 0,
+            patrol: knows || sus || s.alarm_raised ? -1 : 2 + (t === "hold_cores" || t === "regroup" ? 0.5 : 0),
+            investigate: (knows || sus || s.alarm_raised) && !g.sees_intruder ? 2 + (t === "hunt" ? 0.6 : 0) : 0,
             chase: g.sees_intruder && g.hp_value >= 2 ? 2 + (d < 12 ? 0.6 : 0) : -1,
             take_cover: (g.under_fire ? 1.8 : 0) + (g.sees_intruder && d > 14 ? 1 : 0),
-            flank: g.sees_intruder && g.allies_engaging >= 1 ? 1.9 : -1,
+            flank: g.sees_intruder && (g.allies_engaging >= 1 || t === "pincer") ? 1.9 + (t === "pincer" ? 0.5 : 0) : -1,
             retreat: g.hp_value <= 1 && g.sees_intruder ? 2.8 : -2,
           };
         }
@@ -176,32 +192,53 @@ export class Guard {
 
   update(dt, engine) {
     if (!this.alive) return this._dying(dt);
-    this._perceive(engine);
+    this._perceive(engine, dt);
     this._steer(dt, engine);
     this._combat(dt, engine);
   }
 
-  _perceive(engine) {
+  _perceive(engine, dt) {
     const player = this.game.player;
     const pp = player.object3d.position;
     const toP = _v.subVectors(pp, this.pos).setY(0);
     const dist = toP.length();
-    const inFov = dist < 4 || toP.normalize().dot(this.facing) > Math.cos(Math.PI / 3);
-    const chest = pp.clone().setY(pp.y + 1.2);
-    this.sees = player.alive && dist < 32 && inFov && engine.physics.lineOfSight(this.eye, chest);
+    const inFov = dist < 3 || toP.normalize().dot(this.facing) > Math.cos(Math.PI / 3);
+    const inView = player.alive && dist < 32 && inFov && engine.physics.lineOfSight(this.eye, player.chest);
 
-    // Hearing: gunfire within 20m reveals the shooter's position.
-    const heard = engine.time - player.lastShotAt < 0.1 && dist < 20;
-    if (this.sees || heard) {
-      this.lastSeenPos = pp.clone();
-      this.lastSeenAt = engine.time;
+    if (inView) {
+      // Detection fills faster up close, when the intruder is exposed, and during an alarm.
+      const alarm = engine.time < this.game.alarmUntil ? 2 : 1;
+      const range = THREE.MathUtils.clamp(1 - dist / 34, 0.12, 1) * (dist < 3 ? 4 : 1);
+      this.suspicion = Math.min(1, this.suspicion + 1.5 * player.visibility * range * alarm * dt);
+    } else {
+      this.suspicion = Math.max(0, this.suspicion - (this.sees ? 0 : 0.12 * dt));
     }
+    this.sees = inView && this.suspicion >= 1;
+    if (!inView && this.suspicion >= 1) this.suspicion = 0.85; // lost sight: alert but not locked on
+
+    if (inView && this.suspicion > 0.4) this._noticed(pp, engine.time, 0);
+
+    // Hearing: footsteps within the player's noise radius, gunfire within 20m.
+    const gunshot = engine.time - player.lastShotAt < 0.1 && dist < 20;
+    if (gunshot || dist < player.noiseRadius) {
+      this.heardAt = engine.time;
+      this.suspicion = Math.min(0.95, this.suspicion + (gunshot ? 0.6 : 0.5 * dt));
+      this._noticed(pp, engine.time, gunshot ? 1 : 2.5); // sound gives a fuzzy location
+    }
+    if (this.sees) this.game.squad.remember(pp, engine.time);
+  }
+
+  _noticed(pos, time, fuzz) {
+    this.lastSeenPos = pos.clone().add(new THREE.Vector3((Math.random() - 0.5) * fuzz * 2, 0, (Math.random() - 0.5) * fuzz * 2));
+    this.lastSeenAt = time;
   }
 
   _pickTarget(engine) {
     const pp = this.game.player.object3d.position;
     switch (this.action) {
       case "patrol": {
+        const squadSpot = this.game.squad.patrolTarget(this, engine.time);
+        if (squadSpot) return squadSpot;
         const wp = this.route[this.routeIdx];
         if (this.pos.distanceTo(wp) < 0.8) this.routeIdx = (this.routeIdx + 1) % this.route.length;
         return this.route[this.routeIdx];
@@ -216,7 +253,7 @@ export class Guard {
       case "flank": {
         const ref = this.lastSeenPos ?? pp;
         const away = _v.subVectors(this.pos, ref).setY(0).normalize();
-        const side = new THREE.Vector3(-away.z, 0, away.x).multiplyScalar(this.flankSide * 8);
+        const side = new THREE.Vector3(-away.z, 0, away.x).multiplyScalar(this.game.squad.flankSide(this) * 8);
         return clampArena(ref.clone().add(side).addScaledVector(away, 4));
       }
       case "retreat": {
@@ -229,12 +266,29 @@ export class Guard {
 
   _steer(dt, engine) {
     const target = this._pickTarget(engine);
-    const to = new THREE.Vector3().subVectors(target, this.pos).setY(0);
-    const d = to.length();
+    const d = Math.hypot(target.x - this.pos.x, target.z - this.pos.z);
     const stopAt = this.action === "chase" && this.sees ? 6 : 0.6;
     const v = this.body.velocity;
+
+    // Replan when the goal moves noticeably, at most 4x/s; otherwise follow the path.
+    const nav = this.game.nav;
+    const goalMoved = !this.pathGoal || this.pathGoal.distanceTo(target) > 1.5;
+    if ((goalMoved && engine.time - this.pathAt > 0.25) || engine.time - this.pathAt > 1.5) {
+      this.path = nav.clearLine(this.pos, target) ? [target.clone().setY(0)] : nav.findPath(this.pos, target);
+      this.pathGoal = target.clone();
+      this.pathAt = engine.time;
+    }
+    while (this.path.length > 1 && Math.hypot(this.path[0].x - this.pos.x, this.path[0].z - this.pos.z) < 0.6) this.path.shift();
+    const next = this.path[0] ?? target;
+
     let desired = new THREE.Vector3();
-    if (d > stopAt) desired = to.normalize().multiplyScalar(SPEED[this.action]).add(this.jitter);
+    if (d > stopAt) desired = new THREE.Vector3(next.x - this.pos.x, 0, next.z - this.pos.z).normalize().multiplyScalar(SPEED[this.action]).add(this.jitter);
+
+    if (this.game.debug) {
+      this.pathLine.visible = true;
+      this.pathLine.geometry.setFromPoints([this.pos.clone().setY(0.1), ...this.path.map((p) => p.clone().setY(0.1))]);
+      this.pathLine.material.color.setHex(ACTION_COLOR[this.action]);
+    } else this.pathLine.visible = false;
 
     const k = 1 - Math.exp(-8 * dt);
     v.x += (desired.x - v.x) * k;
@@ -299,6 +353,7 @@ export class Guard {
     this.lastHitAt = engine.time;
     this.lastSeenPos = this.game.player.object3d.position.clone();
     this.lastSeenAt = engine.time;
+    this.suspicion = Math.max(this.suspicion, 0.95);
     this.bodyMat.emissive.setHex(0xffffff);
     setTimeout(() => this.bodyMat.emissive.setHex(0x000000), 80);
     if (this.hp <= 0) {
@@ -306,6 +361,7 @@ export class Guard {
       this.dieT = 0;
       engine.physics.removeBody(this.body);
       this.cone.visible = false;
+      this.pathLine.visible = false;
       this.visorMat.emissive.setHex(0x222222);
     }
   }
